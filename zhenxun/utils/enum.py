@@ -13,6 +13,11 @@ class PriorityLifecycleType(StrEnum):
     """关闭"""
 
 
+class BotSentType(StrEnum):
+    GROUP = "GROUP"
+    PRIVATE = "PRIVATE"
+
+
 class BankHandleType(StrEnum):
     DEPOSIT = "DEPOSIT"
     """存款"""
