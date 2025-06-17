@@ -7,7 +7,7 @@ from typing import Any, ClassVar, Literal, cast
 
 import aiofiles
 import httpx
-from httpx import AsyncHTTPTransport, HTTPStatusError, Response
+from httpx import AsyncHTTPTransport, HTTPStatusError, Proxy, Response
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_htmlrender import get_browser
 from playwright.async_api import Page
@@ -34,14 +34,15 @@ def get_async_client(
     if proxies:
         http_proxy = proxies.get("http://")
         https_proxy = proxies.get("https://")
-        transport_kwargs = {}
-        if http_proxy:
-            transport_kwargs["http"] = http_proxy
-        if https_proxy:
-            transport_kwargs["https"] = https_proxy
-        proxy_transport = AsyncHTTPTransport(**transport_kwargs)
         return httpx.AsyncClient(
-            mounts={"http://": proxy_transport, "https://": proxy_transport},
+            mounts={
+                "http://": AsyncHTTPTransport(
+                    proxy=Proxy(http_proxy) if http_proxy else None
+                ),
+                "https://": AsyncHTTPTransport(
+                    proxy=Proxy(https_proxy) if https_proxy else None
+                ),
+            },
             transport=transport,
             **kwargs,
         )
