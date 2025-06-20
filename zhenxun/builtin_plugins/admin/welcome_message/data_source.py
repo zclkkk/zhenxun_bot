@@ -14,6 +14,7 @@ from zhenxun.services.log import logger
 from zhenxun.utils._build_image import BuildImage
 from zhenxun.utils._image_template import ImageTemplate
 from zhenxun.utils.http_utils import AsyncHttpx
+from zhenxun.utils.manager.priority_manager import PriorityLifecycle
 from zhenxun.utils.platform import PlatformUtils
 
 BASE_PATH = DATA_PATH / "welcome_message"
@@ -22,8 +23,11 @@ BASE_PATH.mkdir(parents=True, exist_ok=True)
 driver = nonebot.get_driver()
 
 
-old_file = DATA_PATH / "custom_welcome_msg" / "custom_welcome_msg.json"
-if old_file.exists():
+def __migrate():
+    """首次数据迁移"""
+    old_file = DATA_PATH / "custom_welcome_msg" / "custom_welcome_msg.json"
+    if not old_file.exists():
+        return
     try:
         old_data: dict[str, str] = json.load(old_file.open(encoding="utf8"))
         for group_id, message in old_data.items():
@@ -53,6 +57,7 @@ def migrate(path: Path):
     参数:
         path: 路径
     """
+    __migrate()
     text_file = path / "text.json"
     if not text_file.exists():
         return
@@ -87,7 +92,7 @@ def migrate(path: Path):
         json.dump(new_data, f, ensure_ascii=False, indent=4)
 
 
-@driver.on_startup
+@PriorityLifecycle.on_startup(priority=5)
 def _():
     """数据迁移
 
@@ -248,9 +253,11 @@ class Manager:
         返回:
             list: 消息内容
         """
+        path = cls.get_path(session)
         json_data = cls.__get_data(session)
-        if not json_data:
+        if not json_data or not path:
             return None
+        file = path / "text.json"
         key_list = list(json_data.keys())
         if idx < 0 or idx >= len(key_list):
             return None

@@ -4,11 +4,11 @@ from datetime import datetime, timedelta
 import inspect
 import time
 from types import MappingProxyType
-from typing import Any, ClassVar, Literal
+from typing import Any, Literal
 
 from nonebot.adapters import Bot, Event
 from nonebot.compat import model_dump
-from nonebot_plugin_alconna import UniMessage, UniMsg
+from nonebot_plugin_alconna import At, UniMessage, UniMsg
 from nonebot_plugin_uninfo import Uninfo
 from pydantic import BaseModel, Field, create_model
 from tortoise.expressions import Q
@@ -48,6 +48,10 @@ class Goods(BaseModel):
     """model"""
     session: Uninfo | None = None
     """Uninfo"""
+    at_user: str | None = None
+    """At对象"""
+    at_users: list[str] = []
+    """At对象列表"""
 
 
 class ShopParam(BaseModel):
@@ -65,15 +69,19 @@ class ShopParam(BaseModel):
     """道具单次使用数量"""
     text: str
     """text"""
-    send_success_msg: ClassVar[bool] = True
+    send_success_msg: bool = True
     """是否发送使用成功信息"""
-    max_num_limit: ClassVar[int] = 1
+    max_num_limit: int = 1
     """单次使用最大次数"""
     session: Uninfo | None = None
     """Uninfo"""
     message: UniMsg
     """UniMessage"""
-    extra_data: ClassVar[dict[str, Any]] = {}
+    at_user: str | None = None
+    """At对象"""
+    at_users: list[str] = []
+    """At对象列表"""
+    extra_data: dict[str, Any] = Field(default_factory=dict)
     """额外数据"""
 
     class Config:
@@ -156,6 +164,7 @@ class ShopManage:
         goods: Goods,
         num: int,
         text: str,
+        at_users: list[str] = [],
     ) -> tuple[ShopParam, dict[str, Any]]:
         """构造参数
 
@@ -165,6 +174,7 @@ class ShopManage:
             goods_name: 商品名称
             num: 数量
             text: 其他信息
+            at_users: at用户
         """
         group_id = None
         if session.group:
@@ -172,6 +182,7 @@ class ShopManage:
                 session.group.parent.id if session.group.parent else session.group.id
             )
         _kwargs = goods.params
+        at_user = at_users[0] if at_users else None
         model = goods.model(
             **{
                 "goods_name": goods.name,
@@ -183,6 +194,8 @@ class ShopManage:
                 "text": text,
                 "session": session,
                 "message": message,
+                "at_user": at_user,
+                "at_users": at_users,
             }
         )
         return model, {
@@ -194,6 +207,8 @@ class ShopManage:
             "num": num,
             "text": text,
             "goods_name": goods.name,
+            "at_user": at_user,
+            "at_users": at_users,
         }
 
     @classmethod
@@ -223,6 +238,7 @@ class ShopManage:
             **param.extra_data,
             "session": session,
             "message": message,
+            "shop_param": ShopParam,
         }
         for key in list(param_json.keys()):
             if key not in args:
@@ -308,6 +324,7 @@ class ShopManage:
         goods_name: str,
         num: int,
         text: str,
+        at_users: list[At] = [],
     ) -> str | UniMessage | None:
         """使用道具
 
@@ -319,6 +336,7 @@ class ShopManage:
             goods_name: 商品名称
             num: 使用数量
             text: 其他信息
+            at_users: at用户
 
         返回:
             str | MessageFactory | None: 使用完成后返回信息
@@ -339,16 +357,18 @@ class ShopManage:
         goods = cls.uuid2goods.get(goods_info.uuid)
         if not goods or not goods.func:
             return f"{goods_info.goods_name} 未注册使用函数, 无法使用..."
+        at_user_ids = [at.target for at in at_users]
         param, kwargs = cls.__build_params(
-            bot, event, session, message, goods, num, text
+            bot, event, session, message, goods, num, text, at_user_ids
         )
         if num > param.max_num_limit:
             return f"{goods_info.goods_name} 单次使用最大数量为{param.max_num_limit}..."
         await cls.run_before_after(goods, param, session, message, "before", **kwargs)
-        result = await cls.__run(goods, param, session, message, **kwargs)
         await UserConsole.use_props(
             session.user.id, goods_info.uuid, num, PlatformUtils.get_platform(session)
         )
+        result = await cls.__run(goods, param, session, message, **kwargs)
+
         await cls.run_before_after(goods, param, session, message, "after", **kwargs)
         if not result and param.send_success_msg:
             result = f"使用道具 {goods.name} {num} 次成功！"
@@ -384,10 +404,10 @@ class ShopManage:
         cls.uuid2goods[uuid] = Goods(
             model=create_model(
                 f"{uuid}_model",
-                send_success_msg=send_success_msg,
-                max_num_limit=max_num_limit,
                 __base__=ShopParam,
-                extra_data=kwargs,
+                send_success_msg=(bool, Field(default=send_success_msg)),
+                max_num_limit=(int, Field(default=max_num_limit)),
+                extra_data=(dict[str, Any], Field(default=kwargs)),
             ),
             params=kwargs,
             before_handle=before_handle,
@@ -478,35 +498,45 @@ class ShopManage:
         user = await UserConsole.get_user(user_id, platform)
         if not user.props:
             return None
-        is_change = False
-        for uuid in list(user.props.keys()):
-            if user.props[uuid] <= 0:
-                is_change = True
-                del user.props[uuid]
-        if is_change:
-            await user.save(update_fields=["props"])
-        result = await GoodsInfo.filter(uuid__in=user.props.keys()).all()
-        data_list = []
-        uuid2goods = {item.uuid: item for item in result}
-        column_name = ["-", "使用ID", "名称", "数量", "简介"]
-        for i, p in enumerate(user.props):
-            if prop := uuid2goods.get(p):
-                icon = ""
-                icon_path = ICON_PATH / prop.icon
-                if icon_path.exists():
-                    icon = (icon_path, 33, 33)
-                data_list.append(
-                    [
-                        icon,
-                        i,
-                        prop.goods_name,
-                        user.props[p],
-                        prop.goods_description,
-                    ]
-                )
 
+        goods_list = await GoodsInfo.filter(uuid__in=user.props.keys()).all()
+        goods_by_uuid = {item.uuid: item for item in goods_list}
+        user.props = {
+            uuid: count
+            for uuid, count in user.props.items()
+            if count > 0 and goods_by_uuid.get(uuid)
+        }
+
+        table_rows = []
+        for i, prop_uuid in enumerate(user.props):
+            prop = goods_by_uuid.get(prop_uuid)
+            if not prop:
+                continue
+
+            icon = ""
+            if prop.icon:
+                icon_path = ICON_PATH / prop.icon
+                icon = (icon_path, 33, 33) if icon_path.exists() else ""
+
+            table_rows.append(
+                [
+                    icon,
+                    i,
+                    prop.goods_name,
+                    user.props[prop_uuid],
+                    prop.goods_description,
+                ]
+            )
+
+        if not table_rows:
+            return None
+
+        column_name = ["-", "使用ID", "名称", "数量", "简介"]
         return await ImageTemplate.table_page(
-            f"{name}的道具仓库", "", column_name, data_list
+            f"{name}的道具仓库",
+            "通过 使用道具[ID/名称] 令道具生效",
+            column_name,
+            table_rows,
         )
 
     @classmethod
